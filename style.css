@@ -1,0 +1,36 @@
+:root { color-scheme: light; }
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; background: #fff; }
+.markdown-body {
+  padding: 36px 42px;
+  color: #253047;
+  font-family: "Noto Sans CJK SC", "Microsoft YaHei", "PingFang SC", sans-serif;
+  font-size: var(--body-size);
+  line-height: 1.75;
+  overflow-wrap: anywhere;
+}
+.markdown-body > :first-child { margin-top: 0; }
+.markdown-body > :last-child { margin-bottom: 0; }
+h1, h2, h3, h4, h5, h6 { color: #14233e; line-height: 1.35; margin: 1.15em 0 .55em; }
+h1 { font-size: 1.9em; padding-bottom: .35em; border-bottom: 3px solid #e6edf5; }
+h2 { font-size: 1.45em; padding-bottom: .3em; border-bottom: 1px solid #e6edf5; }
+h3 { font-size: 1.2em; }
+h4, h5, h6 { font-size: 1em; }
+p, ul, ol, blockquote, pre, table { margin: .75em 0; }
+ul, ol { padding-left: 1.5em; }
+li + li { margin-top: .2em; }
+li > p { margin: .3em 0; }
+blockquote { margin-left: 0; padding: .3em 1em; background: #f1f6fc; border-left: 4px solid #6d91bd; color: #52627a; }
+blockquote > :first-child { margin-top: 0; }
+blockquote > :last-child { margin-bottom: 0; }
+a { color: #2463bd; text-decoration: underline; text-underline-offset: 3px; }
+strong { color: #152a48; }
+code { font-family: "Cascadia Code", Consolas, "Noto Sans Mono CJK SC", monospace; font-size: .88em; background: #edf2f8; padding: .12em .3em; border-radius: 4px; }
+pre { padding: 18px 20px; background: #f5f7fb; border: 1px solid #e1e7f0; border-radius: 8px; white-space: pre-wrap; overflow-wrap: anywhere; tab-size: 4; line-height: 1.6; }
+pre code { padding: 0; background: transparent; border-radius: 0; }
+table { width: 100%; border-collapse: collapse; table-layout: fixed; font-size: .95em; }
+th, td { border: 1px solid #dce4ee; padding: .5em .65em; vertical-align: top; }
+th { background: #eaf0f8; color: #1b3457; font-weight: 600; }
+tr:nth-child(even) td { background: #f7f9fc; }
+hr { border: 0; height: 1px; background: #dce4ee; margin: 1.3em 0; }
+.image-label { color: #64748b; font-style: italic; }

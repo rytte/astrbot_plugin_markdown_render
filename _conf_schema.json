@@ -1,0 +1,34 @@
+{
+  "mode": {
+    "description": "转图模式",
+    "type": "string",
+    "default": "tool",
+    "options": ["tool", "auto"],
+    "labels": ["模型工具", "自动检测"],
+    "hint": "tool：提供 render_markdown_image，由模型决定调用。auto：完整回复总分达到阈值后，若有可独立转换的表格或多行代码块，且区块外得分低于阈值，只转换这些区块，其余文字保留原文和顺序；否则整篇转图。任一区块失败保留整条原文。自动模式等待完整回复后发送，保存后生效。"
+  },
+  "auto_threshold": {
+    "description": "自动转图阈值",
+    "type": "int",
+    "default": 6,
+    "hint": "仅自动模式使用，允许 1～30，默认 6。总分达到阈值才转图；有可独立转换的表格或至少两行非空内容的代码块时，区块外得分也达到同一阈值才整篇转图，否则局部转图。表格和多行代码块仍各计 6 分；其内部格式不计入区块外得分。没有可独立转换的区块时按总分判断。这是结构评分，不是准确率。"
+  },
+  "width": {
+    "description": "图片宽度（像素）",
+    "type": "int",
+    "default": 900,
+    "hint": "允许 480～1600；超长内容在工具模式下返回错误，由模型分段调用；自动模式下保留原文。"
+  },
+  "font_size": {
+    "description": "正文字号（像素）",
+    "type": "int",
+    "default": 22,
+    "hint": "允许 14～32。"
+  },
+  "browser_executable": {
+    "description": "浏览器可执行文件路径（Chromium / Edge）",
+    "type": "string",
+    "default": "",
+    "hint": "留空使用 Playwright 安装的 Chromium，也可由管理员配置本地 Chromium 或 Edge 路径。填写浏览器可执行文件的绝对路径，不加引号；本插件所有图片命令共用，保存后生效。路径无效或启动失败时明确报错，不自动切换。"
+  }
+}
