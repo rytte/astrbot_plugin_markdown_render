@@ -4,25 +4,33 @@ AstrBot 插件，提供**模型工具**和**自动检测**两种转图模式。�
 
 [查看实际渲染示例](./demo.png)
 
+> [!IMPORTANT]
+>
+> 本插件的图片渲染依赖于 [浏览器服务]([rytte/astrbot_plugin_browser](https://github.com/rytte/astrbot_plugin_browser)) 插件。
+>
+> * `浏览器服务` 插件负责统一启动一个本地无头 Chromium，并为每次渲染提供独立的页面会话。
+>* 避免每个依赖浏览器渲染的插件重复配置，重复启动浏览器、减少内存占用，同时保持离线渲染和任务隔离。
+
 ## 安装
 
 要求 AstrBot **>=4.27,<5**、Python 3.12+，以及支持图片消息的平台适配器。已针对本地 AstrBot 4.27.4 验证接口。
 
 1. 将完整插件目录放入 `AstrBot/data/plugins/astrbot_plugin_markdown_render/`，或在 AstrBot 管理面板上传插件 ZIP。
-2. 在**运行 AstrBot 的同一个 Python 环境**中安装依赖和浏览器：
+2. 安装本插件依赖，并安装、启用 `astrbot_plugin_browser` 浏览器服务插件。由浏览器服务统一安装 Playwright 和 Chromium：
 
    ```bash
    python -m pip install -r data/plugins/astrbot_plugin_markdown_render/requirements.txt
+   python -m pip install -r data/plugins/astrbot_plugin_browser/requirements.txt
    python -m playwright install chromium
    ```
 
-   如果由管理员配置本机已有的 Chromium 或 Edge 可执行文件路径，可以省略浏览器下载；Python 依赖仍需安装。
+   也可以在 `astrbot_plugin_browser` 配置中指定本机已有的 Chromium 或 Edge 可执行文件路径。
 
    Linux 若缺少浏览器系统依赖，改用 `python -m playwright install --with-deps chromium`（安装系统依赖可能需要管理员权限）。中文字体建议安装 `fonts-noto-cjk`。Docker 部署必须在运行 AstrBot 的容器环境里安装浏览器、系统依赖和字体。
 
 3. 在 AstrBot 插件管理页加载插件并选择模式。默认 `tool` 模式需要在当前配置/人格的工具选择中启用 `render_markdown_image`，模型需要支持工具调用；`auto` 模式直接检测模型文字回复，不要求模型调用转图工具。
 
-插件加载时会启动配置的浏览器。路径无效或启动失败时会在插件加载错误与日志中明确报错，不自动改用默认 Chromium、其他浏览器或在线服务。运行中渲染失败：工具模式返回明确错误；自动模式记录错误并保留原始文字。
+插件通过 `astrbot_plugin_browser` 获取隔离的离线页面会话；浏览器进程由该服务插件统一启动和回收。运行中渲染失败：工具模式返回明确错误；自动模式记录错误并保留原始文字。
 
 ## 模式一：模型工具（tool，默认）
 
@@ -97,7 +105,7 @@ AstrBot 插件，提供**模型工具**和**自动检测**两种转图模式。�
 
 ## 配置
 
-由管理员在 AstrBot 插件配置页修改并保存。AstrBot 保存配置时会自动热重载插件、关闭旧浏览器并启动新配置的浏览器；保存完成后生效，无需再手动重载。所有图片命令/工具共用这一配置，模型不能通过工具参数指定浏览器路径。
+由管理员在 AstrBot 插件配置页修改并保存。宽度和字号仅影响 Markdown 图片；浏览器路径与并发会话数在 `astrbot_plugin_browser` 中统一配置。模型不能通过工具参数指定浏览器路径。
 
 | 配置 | 默认值 | 说明 |
 | --- | --- | --- |
@@ -105,16 +113,6 @@ AstrBot 插件，提供**模型工具**和**自动检测**两种转图模式。�
 | `auto_threshold` | `6` | 整条回复总分达到此阈值才转图；有可独立转换的区块时，区块外得分也达到此阈值才整篇转图，否则局部转图。整数 1～30 |
 | `width` | `900` | 图片宽度，整数，480～1600 像素 |
 | `font_size` | `22` | 正文字号，整数，14～32 像素 |
-| `browser_executable` | 空 | 留空使用 Playwright 安装的 Chromium；也可填写本地 Chromium 或 Edge 可执行文件的绝对路径，不加引号 |
-
-Windows Edge 示例（以实际安装位置为准）：
-
-```text
-C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe
-```
-
-路径中可以包含空格，但不要在整个路径外添加单引号或双引号，也不要填目录、相对路径或命令行参数。必须是 **AstrBot 所在机器/容器**能访问的文件；不会自动去除引号、搜索其他浏览器或在启动失败后切换。配置错误时先修正路径，再保存或使用 AstrBot 的加载失败修复入口。
-
 使用操作系统的中文字体：优先 Noto Sans CJK SC、微软雅黑、苹方。容器中显示方框通常意味着未安装中文字体。
 
 ## 本地预览与测试

@@ -58,13 +58,27 @@ class MarkdownImagePlugin(Star):
         self.auto_threshold = settings.pop("auto_threshold", 6)
         if type(self.auto_threshold) is not int or not 1 <= self.auto_threshold <= 30:
             raise RenderError("auto_threshold 必须是 1～30 的整数。")
-        unknown = set(settings) - {"width", "font_size", "browser_executable"}
+        if settings.pop("browser_executable", ""):
+            logger.warning(
+                "Markdown renderer browser_executable is now configured by astrbot_plugin_browser."
+            )
+        unknown = set(settings) - {"width", "font_size"}
         if unknown:
             raise RenderError("未知插件配置：" + ", ".join(sorted(unknown)))
-        self.renderer = MarkdownRenderer(**settings)
+        self.renderer = MarkdownRenderer(
+            **settings, browser_service_resolver=self.get_browser_service
+        )
+
+    def get_browser_service(self):
+        metadata = self.context.get_registered_star("astrbot_plugin_browser")
+        plugin = metadata.star_cls if metadata and metadata.activated else None
+        service = getattr(plugin, "service", None)
+        if service is None:
+            raise RenderError("浏览器服务不可用，请启用 astrbot_plugin_browser 插件。")
+        return service
 
     async def initialize(self) -> None:
-        """Check browser availability when loading the plugin."""
+        """Initialize renderer state and register the selected mode's tool."""
         await self.renderer.initialize()
         if self.mode == "tool":
             self.context.add_llm_tools(MarkdownImageTool(self.render_markdown_image))
@@ -93,7 +107,7 @@ class MarkdownImagePlugin(Star):
             return
         # Auto mode owns this reply's image decision, including text on failure.
         result.use_t2i_ = False
-        if not all(isinstance(part, (Plain, At, Reply)) for part in result.chain):
+        if not all(isinstance(part, Plain | At | Reply) for part in result.chain):
             return
         positions = [
             i for i, part in enumerate(result.chain) if isinstance(part, Plain)

@@ -1,4 +1,5 @@
 import asyncio
+import io
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -88,6 +89,18 @@ async def test_plugin_lifecycle(plugin):
     plugin.renderer.close.assert_awaited_once()
 
 
+async def test_browser_service_resolution_requires_an_active_plugin(plugin):
+    service = object()
+    plugin.context.get_registered_star = lambda name: SimpleNamespace(
+        activated=True, star_cls=SimpleNamespace(service=service)
+    )
+    assert plugin.get_browser_service() is service
+
+    plugin.context.get_registered_star = lambda name: None
+    with pytest.raises(RenderError, match="请启用 astrbot_plugin_browser"):
+        plugin.get_browser_service()
+
+
 def test_required_argument_rejected_by_schema():
     from jsonschema import ValidationError, validate
 
@@ -115,6 +128,11 @@ async def test_real_render_to_astrbot_image():
     event = SimpleNamespace(send=AsyncMock())
     try:
         await instance.initialize()
+        from PIL import Image as PILImage
+
+        buffer = io.BytesIO()
+        PILImage.new("RGB", (4, 4), "white").save(buffer, format="PNG")
+        instance.renderer.render = AsyncMock(return_value=buffer.getvalue())
         result = json.loads(await instance.render_markdown_image(event, "# 中文图片"))
         assert result["ok"]
         image = event.send.call_args.args[0].chain[0]
@@ -124,9 +142,7 @@ async def test_real_render_to_astrbot_image():
         await instance.terminate()
 
 
-async def test_dashboard_save_reloads_shared_browser_config(
-    plugin, tmp_path, monkeypatch
-):
+async def test_dashboard_save_reloads_markdown_config(plugin, tmp_path, monkeypatch):
     from astrbot.api import AstrBotConfig
     from astrbot.dashboard.services.config_service import ConfigFileService
     from astrbot_plugin_markdown_render.renderer import MarkdownRenderer
@@ -152,22 +168,19 @@ async def test_dashboard_save_reloads_shared_browser_config(
     manager = SimpleNamespace(reload=AsyncMock(side_effect=reload_plugin))
     service = ConfigFileService(SimpleNamespace(plugin_manager=manager))
     monkeypatch.setattr(service, "get_plugin_metadata_by_name", lambda name: metadata)
-    edge_path = tmp_path / "Program Files" / "Edge" / "msedge.exe"
-    edge_path.parent.mkdir(parents=True)
-    edge_path.touch()
     with (
         patch.object(MarkdownRenderer, "initialize", new_callable=AsyncMock),
         patch.object(MarkdownRenderer, "close", new_callable=AsyncMock) as close,
     ):
         await current.initialize()
         await service.save_plugin_configs(
-            dict(config, browser_executable=str(edge_path)),
+            dict(config, width=1000),
             "astrbot_plugin_markdown_render",
         )
         manager.reload.assert_awaited_once_with("astrbot_plugin_markdown_render")
         close.assert_awaited_once()
         assert current is not previous
-        assert current.renderer.browser_executable == str(edge_path)
+        assert current.renderer.width == 1000
         tool = plugin.context.get_llm_tool_manager().get_func("render_markdown_image")
         assert tool.handler.__self__ is current
         current.renderer.render = AsyncMock(return_value=b"image bytes")

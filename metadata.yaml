@@ -1,6 +1,6 @@
 name: astrbot_plugin_markdown_render
-display_name: MarkDown⠈渲染
+display_name: MarkDown 渲染
 desc: 支持模型工具与自动检测两种模式，将 Markdown 在本地渲染为 PNG；自动模式渲染失败保留原文。
-version: v0.2.2
+version: 0.3.0
 author: rytte
 astrbot_version: ">=4.27,<5"

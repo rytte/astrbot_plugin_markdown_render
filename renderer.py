@@ -3,14 +3,13 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 import math
+from collections.abc import Callable
 from html import escape
 from pathlib import Path
+from typing import Any
 
 from markdown_it import MarkdownIt
-from playwright.async_api import Browser, Playwright, async_playwright
-from playwright.async_api import Error as PlaywrightError
 from pygments import highlight
 from pygments.formatters import HtmlFormatter
 from pygments.lexers import get_lexer_by_name
@@ -21,7 +20,6 @@ MAX_HEIGHT = 12_000
 MAX_PIXELS = 12_000_000
 MAX_PENDING = 4
 RENDER_TIMEOUT = 45
-logger = logging.getLogger(__name__)
 
 
 class RenderError(ValueError):
@@ -68,54 +66,25 @@ def render_image_label(renderer, tokens, idx, options, env) -> str:
 
 
 class MarkdownRenderer:
-    """Keep one browser, serialize screenshots, and bound queued work."""
+    """Prepare Markdown and use the shared browser service for screenshots."""
 
     def __init__(
-        self, width: int = 900, font_size: int = 22, browser_executable: str = ""
+        self,
+        width: int = 900,
+        font_size: int = 22,
+        browser_service_resolver: Callable[[], Any] | None = None,
     ):
         if type(width) is not int or not 480 <= width <= 1600:
             raise RenderError("width 必须是 480～1600 的整数。")
         if type(font_size) is not int or not 14 <= font_size <= 32:
             raise RenderError("font_size 必须是 14～32 的整数。")
-        if not isinstance(browser_executable, str):
-            raise RenderError("browser_executable 必须是字符串。")
-        if browser_executable:
-            if (
-                browser_executable[0] in "\"'“”‘’"
-                or browser_executable[-1] in "\"'“”‘’"
-            ):
-                raise RenderError(
-                    "browser_executable 请填写浏览器可执行文件的绝对路径，不要加引号。"
-                )
-            if browser_executable != browser_executable.strip() or any(
-                char in browser_executable for char in "\r\n\0"
-            ):
-                raise RenderError(
-                    "browser_executable 不得含首尾空白、换行或空字符；使用默认 Chromium 请留空。"
-                )
-            path = Path(browser_executable)
-            if not path.is_absolute():
-                raise RenderError(
-                    "browser_executable 必须是 Chromium 或 Edge 可执行文件的绝对路径。"
-                )
-            try:
-                exists = path.is_file()
-            except OSError as exc:
-                raise RenderError(
-                    f"无法访问 browser_executable 指定的文件：{path}。请检查路径和访问权限。"
-                ) from exc
-            if not exists:
-                raise RenderError(
-                    f"browser_executable 指定的文件不存在或不是文件：{path}。不会自动切换浏览器。"
-                )
         self.width = width
         self.font_size = font_size
-        self.browser_executable = browser_executable
-        self.browser: Browser | None = None
-        self.playwright: Playwright | None = None
+        self.browser_service_resolver = browser_service_resolver
         self.lock = asyncio.Lock()
         self.tasks: set[asyncio.Task] = set()
         self.closed = False
+        self.initialized = False
         self.styles = (Path(__file__).parent / "style.css").read_text(encoding="utf-8")
         self.styles += HtmlFormatter(style="friendly").get_style_defs("pre code")
         self.parser = MarkdownIt(
@@ -124,41 +93,14 @@ class MarkdownRenderer:
         self.parser.add_render_rule("image", render_image_label)
 
     async def initialize(self) -> None:
-        """Launch the configured Chromium or Edge without browser fallback.
+        """Mark the renderer available without owning the shared browser.
 
         Raises:
-            RenderError: Browser startup fails or the renderer was closed.
+            RenderError: The renderer was closed.
         """
-        async with self.lock:
-            if self.closed:
-                raise RenderError("插件已停止，请重新加载插件。")
-            if self.browser is not None:
-                return
-            try:
-                async with asyncio.timeout(20):
-                    self.playwright = await async_playwright().start()
-                    launch = {"headless": True}
-                    if self.browser_executable:
-                        launch["executable_path"] = self.browser_executable
-                    self.browser = await self.playwright.chromium.launch(**launch)
-            except BaseException as exc:
-                if self.playwright is not None:
-                    await self.playwright.stop()
-                    self.playwright = None
-                if isinstance(exc, (PlaywrightError, TimeoutError, OSError)):
-                    if self.browser_executable:
-                        raise RenderError(
-                            "配置的本地浏览器启动失败："
-                            f"{self.browser_executable}。"
-                            "请确认它是 Chromium 或 Edge 的可执行文件，并检查运行权限与系统依赖；"
-                            "未自动切换到其他浏览器。"
-                        ) from exc
-                    raise RenderError(
-                        "Playwright 默认 Chromium 启动失败。请在运行 AstrBot 的 Python 环境中执行 "
-                        "python -m playwright install chromium；Linux 还需安装浏览器系统依赖。"
-                        "未自动切换到其他浏览器。"
-                    ) from exc
-                raise
+        if self.closed:
+            raise RenderError("插件已停止，请重新加载插件。")
+        self.initialized = True
 
     def html(self, markdown: str) -> str:
         """Convert bounded Markdown into a self-contained, script-free page.
@@ -207,25 +149,28 @@ class MarkdownRenderer:
             raise RenderError("markdown 必须是非空字符串。")
         if len(markdown) > MAX_CHARACTERS:
             raise RenderError("Markdown 超过 20000 个字符，请按章节分段调用。")
-        if self.closed or self.browser is None or not self.browser.is_connected():
-            raise RenderError("本地浏览器未运行，请重新加载插件。")
+        if self.closed or not self.initialized:
+            raise RenderError("渲染器未运行，请重新加载插件。")
         if len(self.tasks) >= MAX_PENDING:
             raise RenderError("渲染队列已满，请稍后重试。")
+        service = (
+            self.browser_service_resolver()
+            if self.browser_service_resolver is not None
+            else None
+        )
+        if service is None:
+            raise RenderError("浏览器服务不可用，请启用 astrbot_plugin_browser 插件。")
         task = asyncio.current_task()
         self.tasks.add(task)
         try:
             async with asyncio.timeout(RENDER_TIMEOUT):
                 async with self.lock:
                     document = await asyncio.to_thread(self.html, markdown)
-                    context = await self.browser.new_context(
+                    async with service.session(
                         viewport={"width": self.width, "height": 720},
-                        device_scale_factor=1,
-                        java_script_enabled=False,
-                        service_workers="block",
-                    )
-                    try:
-                        await context.route("**/*", lambda route: route.abort())
-                        page = await context.new_page()
+                        javascript_enabled=False,
+                        timeout=RENDER_TIMEOUT,
+                    ) as page:
                         await page.set_content(document, wait_until="load")
                         await page.evaluate("document.fonts.ready")
                         article = page.locator(".markdown-body")
@@ -243,31 +188,17 @@ class MarkdownRenderer:
                         return await article.screenshot(
                             type="png", animations="disabled"
                         )
-                    finally:
-                        try:
-                            async with asyncio.timeout(5):
-                                await context.close()
-                        except Exception:
-                            logger.exception("Failed to close Markdown browser context")
         except TimeoutError as exc:
             raise RenderError("本地渲染超时，未发送图片；请缩短内容后重试。") from exc
         finally:
             self.tasks.discard(task)
 
     async def close(self) -> None:
-        """Cancel pending renders and release the browser process."""
+        """Cancel pending renders without closing the shared browser service."""
         self.closed = True
         tasks = list(self.tasks)
         for task in tasks:
             task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
-        async with self.lock:
-            try:
-                if self.browser is not None:
-                    await self.browser.close()
-            finally:
-                self.browser = None
-                if self.playwright is not None:
-                    await self.playwright.stop()
-                    self.playwright = None
+        self.initialized = False

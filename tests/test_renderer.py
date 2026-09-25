@@ -1,22 +1,61 @@
 import asyncio
-from io import BytesIO
-from pathlib import Path
-from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+import os
+from contextlib import asynccontextmanager
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from astrbot_plugin_markdown_render.renderer import (
     MAX_CHARACTERS,
+    MAX_HEIGHT,
     MAX_PENDING,
     MarkdownRenderer,
     RenderError,
 )
-from PIL import Image
+
+
+class FakeService:
+    def __init__(self):
+        self.options = []
+        self.closed_sessions = 0
+        self.box = {"width": 900, "height": 600}
+        self.set_content_side_effect = None
+
+    @asynccontextmanager
+    async def session(self, **options):
+        self.options.append(options)
+        page = FakePage(self)
+        try:
+            yield page
+        finally:
+            self.closed_sessions += 1
+
+
+class FakePage:
+    def __init__(self, service):
+        self.service = service
+        self.set_content = AsyncMock(side_effect=self._set_content)
+        self.locator_instance = FakeLocator(service)
+        self.locator = Mock(return_value=self.locator_instance)
+
+    async def _set_content(self, *args, **kwargs):
+        if self.service.set_content_side_effect is not None:
+            await self.service.set_content_side_effect()
+
+    async def evaluate(self, script):
+        return None
+
+
+class FakeLocator:
+    def __init__(self, service):
+        self.bounding_box = AsyncMock(return_value=service.box)
+        self.screenshot = AsyncMock(return_value=b"png-bytes")
 
 
 @pytest.fixture
 async def renderer():
-    instance = MarkdownRenderer()
+    service = FakeService()
+    instance = MarkdownRenderer(browser_service_resolver=lambda: service)
+    instance.service = service
     await instance.initialize()
     yield instance
     await instance.close()
@@ -42,8 +81,7 @@ def test_invalid_markdown(value):
         {"font_size": 33},
         {"font_size": 13},
         {"font_size": False},
-        {"browser_executable": 123},
-        {"browser_executable": "missing-browser"},
+        {"browser_executable": "legacy setting"},
         {"legacy_width": 900},
     ],
 )
@@ -74,76 +112,47 @@ def test_markdown_structure_highlighting_and_html_escaping():
     assert "图片未加载：示意图" in document
 
 
-async def test_real_png_dimensions_and_no_network(renderer):
-    requests = []
-    new_context = renderer.browser.new_context
-
-    async def observe_context(**kwargs):
-        context = await new_context(**kwargs)
-        context.on("request", lambda request: requests.append(request.url))
-        return context
-
-    with patch.object(renderer.browser, "new_context", side_effect=observe_context):
-        png = await renderer.render(
-            "# 本地图片\n\n| 中文 | value |\n| --- | --- |\n| 表格 | 正常 |\n\n"
-            '```python\nprint("hello")\n```\n\n'
-            "![图片](http://127.0.0.1:9/private)\n\n"
-            '<img src="file:///etc/passwd">\n\n'
-            '<script src="https://example.com/script.js"></script>'
-        )
-    image = Image.open(BytesIO(png))
-    assert image.format == "PNG"
-    assert image.width == 900
-    assert 100 < image.height < 12_000
-    assert image.convert("L").getextrema()[0] < 100
-    assert requests == []
-    assert renderer.browser.contexts == []
-    assert not renderer.tasks
-
-
-async def test_long_code_and_table_do_not_overflow(renderer):
-    document = renderer.html(
-        "| very long cell | code |\n| --- | --- |\n| "
-        + "x" * 1000
-        + " | `"
-        + "y" * 1000
-        + "` |\n\n```text\n"
-        + "z" * 1000
-        + "\n```"
+async def test_render_uses_shared_offline_page_session(renderer):
+    png = await renderer.render(
+        "# 本地图片\n\n| 中文 | value |\n| --- | --- |\n| 表格 | 正常 |\n\n"
+        '```python\nprint("hello")\n```\n\n'
+        "![图片](http://127.0.0.1:9/private)\n\n"
+        '<img src="file:///etc/passwd">\n\n'
+        '<script src="https://example.com/script.js"></script>'
     )
-    page = await renderer.browser.new_page(viewport={"width": 900, "height": 720})
-    try:
-        await page.set_content(document)
-        assert await page.evaluate("document.documentElement.scrollWidth") == 900
-    finally:
-        await page.close()
 
-
-async def test_oversized_layout_rejected_and_context_closed(renderer):
-    with pytest.raises(RenderError, match="图片过长"):
-        await renderer.render("段落\n\n" * 500)
-    assert renderer.browser.contexts == []
+    assert png == b"png-bytes"
+    assert renderer.service.options == [
+        {
+            "viewport": {"width": 900, "height": 720},
+            "javascript_enabled": False,
+            "timeout": 45,
+        }
+    ]
+    assert renderer.service.closed_sessions == 1
     assert not renderer.tasks
 
 
-async def test_timeout_cleans_context(renderer, monkeypatch):
+async def test_oversized_layout_rejected_and_session_closed(renderer):
+    renderer.service.box = {"width": 900, "height": MAX_HEIGHT + 1}
+    with pytest.raises(RenderError, match="图片过长"):
+        await renderer.render("正文")
+    assert renderer.service.closed_sessions == 1
+    assert not renderer.tasks
+
+
+async def test_timeout_cleans_session(renderer, monkeypatch):
     import astrbot_plugin_markdown_render.renderer as module
 
     monkeypatch.setattr(module, "RENDER_TIMEOUT", 0.2)
-    new_context = renderer.browser.new_context
 
     async def wait_forever():
         await asyncio.sleep(60)
 
-    async def blocked_context(**kwargs):
-        context = await new_context(**kwargs)
-        context.new_page = wait_forever
-        return context
-
-    with patch.object(renderer.browser, "new_context", side_effect=blocked_context):
-        with pytest.raises(RenderError, match="超时"):
-            await renderer.render("正文")
-    assert renderer.browser.contexts == []
+    renderer.service.set_content_side_effect = wait_forever
+    with pytest.raises(RenderError, match="超时"):
+        await renderer.render("正文")
+    assert renderer.service.closed_sessions == 1
     assert not renderer.tasks
 
 
@@ -159,119 +168,27 @@ async def test_queue_limit_and_unload_cancels_pending_work(renderer):
     await renderer.close()
     assert all(task.cancelled() for task in pending)
     assert not renderer.tasks
-    assert renderer.browser is None
-    assert renderer.playwright is None
     with pytest.raises(RenderError, match="未运行"):
         await renderer.render("正文")
 
 
-async def test_browser_startup_failure_is_actionable():
-    from astrbot_plugin_markdown_render import renderer as module
-    from playwright.async_api import Error as PlaywrightError
+@pytest.mark.skipif(
+    not os.environ.get("ASTRBOT_BROWSER_EXECUTABLE"),
+    reason="Set ASTRBOT_BROWSER_EXECUTABLE to run a real browser integration test",
+)
+async def test_real_browser_renders_markdown_offline():
+    from astrbot_plugin_browser.service import BrowserService
 
-    playwright = AsyncMock()
-    playwright.chromium.launch.side_effect = PlaywrightError("executable missing")
-    instance = MarkdownRenderer()
-    with patch.object(module, "async_playwright") as manager:
-        manager.return_value.start = AsyncMock(return_value=playwright)
-        with pytest.raises(RenderError, match="playwright install chromium"):
-            await instance.initialize()
-    playwright.stop.assert_awaited_once()
-    playwright.chromium.launch.assert_awaited_once_with(headless=True)
-    assert instance.playwright is None
-    assert instance.browser is None
-
-
-@pytest.mark.parametrize("quote", ['"', "'", "“", "”", "‘", "’"])
-def test_quoted_browser_paths_are_rejected(tmp_path, quote):
-    executable = tmp_path / "msedge.exe"
-    executable.touch()
-    with pytest.raises(RenderError, match="不要加引号"):
-        MarkdownRenderer(browser_executable=f"{quote}{executable}{quote}")
-
-
-@pytest.mark.parametrize("value", [" ", "\t", "relative/msedge.exe"])
-def test_blank_space_and_relative_paths_do_not_select_default_browser(value):
-    with pytest.raises(RenderError):
-        MarkdownRenderer(browser_executable=value)
-
-
-def test_nonexistent_browser_and_directory_fail_before_startup(tmp_path):
-    for path in (tmp_path / "missing.exe", tmp_path):
-        with pytest.raises(RenderError, match="不存在或不是文件"):
-            MarkdownRenderer(browser_executable=str(path))
-
-
-@pytest.mark.parametrize("executable_name", [None, "chrome.exe", "msedge.exe"])
-async def test_browser_selection_is_passed_exactly_to_playwright(
-    tmp_path, executable_name
-):
-    from astrbot_plugin_markdown_render import renderer as module
-
-    executable = ""
-    if executable_name:
-        path = tmp_path / "Program Files" / executable_name
-        path.parent.mkdir()
-        path.touch()
-        executable = str(path)
-    browser = SimpleNamespace(close=AsyncMock())
-    playwright = SimpleNamespace(
-        chromium=SimpleNamespace(launch=AsyncMock(return_value=browser)),
-        stop=AsyncMock(),
+    service = BrowserService(
+        browser_executable=os.environ["ASTRBOT_BROWSER_EXECUTABLE"]
     )
-    instance = MarkdownRenderer(browser_executable=executable)
-    with patch.object(module, "async_playwright") as manager:
-        manager.return_value.start = AsyncMock(return_value=playwright)
-        try:
-            await instance.initialize()
-            expected = {"headless": True}
-            if executable:
-                expected["executable_path"] = executable
-            playwright.chromium.launch.assert_awaited_once_with(**expected)
-            assert instance.browser is browser
-        finally:
-            await instance.close()
-    browser.close.assert_awaited_once()
-
-
-@pytest.mark.parametrize("error_type", [RuntimeError, TimeoutError, PermissionError])
-async def test_custom_browser_failure_never_launches_default(tmp_path, error_type):
-    from astrbot_plugin_markdown_render import renderer as module
-    from playwright.async_api import Error as PlaywrightError
-
-    executable = tmp_path / "msedge.exe"
-    executable.touch()
-    error = (
-        PlaywrightError("failed to launch")
-        if error_type is RuntimeError
-        else error_type("failed to launch")
-    )
-    playwright = AsyncMock()
-    playwright.chromium.launch.side_effect = error
-    instance = MarkdownRenderer(browser_executable=str(executable))
-    with patch.object(module, "async_playwright") as manager:
-        manager.return_value.start = AsyncMock(return_value=playwright)
-        with pytest.raises(RenderError, match="配置的本地浏览器启动失败") as caught:
-            await instance.initialize()
-    assert str(executable) in str(caught.value)
-    assert "playwright install" not in str(caught.value)
-    playwright.chromium.launch.assert_awaited_once_with(
-        headless=True, executable_path=str(executable)
-    )
-    playwright.stop.assert_awaited_once()
-    assert instance.browser is None
-    assert instance.playwright is None
-
-
-async def test_real_edge_can_render_with_an_absolute_executable_path():
-    executable = Path("C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe")
-    if not executable.is_file():
-        pytest.skip("This machine does not have Edge installed at the test path")
-    instance = MarkdownRenderer(browser_executable=str(executable))
+    renderer = MarkdownRenderer(browser_service_resolver=lambda: service)
+    await service.initialize()
+    await renderer.initialize()
     try:
-        await instance.initialize()
-        png = await instance.render("# Edge 渲染\n\n**本地浏览器路径**")
-        image = Image.open(BytesIO(png))
-        assert image.format == "PNG" and image.width == 900
+        png = await renderer.render("# 中文标题\n\n**共享浏览器会话**")
+        assert png.startswith(b"\x89PNG\r\n\x1a\n")
+        assert service.ready
     finally:
-        await instance.close()
+        await renderer.close()
+        await service.close()
