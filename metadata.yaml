@@ -1,6 +1,6 @@
 name: astrbot_plugin_markdown_render
 display_name: MarkDown 渲染
-desc: 模型工具与自动渲染可独立开启，同时使用时避免本轮重复转图；将 Markdown 在本地渲染为 PNG，自动渲染失败保留原文。
-version: 0.4.0
+desc: 将 Markdown 在本地渲染为 PNG 图片，提供自动渲染和模型工具两种方式。支持普通 Markdown 语法、代码高亮、LaTeX 公式、Mermaid 图表，自动渲染失败保留原文。
+version: 0.5.0
 author: rytte
 astrbot_version: ">=4.27,<5"
