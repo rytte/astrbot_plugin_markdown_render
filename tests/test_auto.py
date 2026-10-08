@@ -18,7 +18,7 @@ TABLE = "| 时间 | 任务 |\n| --- | --- |\n| 上午 | 阅读 |"
 def plugin():
     context = object.__new__(Context)
     context.provider_manager = SimpleNamespace(llm_tools=FunctionToolManager())
-    instance = MarkdownImagePlugin(context, {"mode": "auto"})
+    instance = MarkdownImagePlugin(context, {})
     instance.renderer = SimpleNamespace(
         render=AsyncMock(return_value=b"png bytes"),
         initialize=AsyncMock(),
@@ -42,28 +42,125 @@ def make_event(chain=None, content_type=ResultContentType.LLM_RESULT):
     )
 
 
-async def test_auto_mode_does_not_expose_or_run_model_tool(plugin):
+async def test_auto_only_does_not_expose_or_run_model_tool(plugin):
     await plugin.initialize()
     assert not plugin.context.get_llm_tool_manager().func_list
     event = make_event()
     receipt = json.loads(await plugin.render_markdown_image(event, TABLE))
-    assert receipt["stage"] == "mode" and not receipt["ok"]
+    assert receipt["stage"] == "disabled" and not receipt["ok"]
     plugin.renderer.render.assert_not_awaited()
     event.send.assert_not_awaited()
 
 
-async def test_auto_waits_for_complete_reply_without_changing_tool_mode(plugin):
+async def test_only_auto_render_disables_streaming(plugin):
     event = make_event()
     event.set_extra("enable_streaming", True)
     await plugin.prepare_auto_reply(event)
     assert event.get_extra("enable_streaming") is False
-    plugin.mode = "tool"
+    plugin.enable_auto_render = False
     event.set_extra("enable_streaming", True)
     await plugin.prepare_auto_reply(event)
     assert event.get_extra("enable_streaming") is True
     await plugin.auto_render_reply(event)
     plugin.renderer.render.assert_not_awaited()
     assert event.result.use_t2i_ is None
+
+
+@pytest.mark.parametrize("enable_tool", [False, True])
+@pytest.mark.parametrize("enable_auto_render", [False, True])
+async def test_features_are_independent(plugin, enable_tool, enable_auto_render):
+    instance = MarkdownImagePlugin(
+        plugin.context,
+        {"enable_tool": enable_tool, "enable_auto_render": enable_auto_render},
+    )
+    instance.renderer = plugin.renderer
+    await instance.initialize()
+    tools = instance.context.get_llm_tool_manager().func_list
+    assert bool(tools) is enable_tool
+    event = make_event()
+    await instance.prepare_auto_reply(event)
+    assert event.get_extra("enable_streaming") is (
+        False if enable_auto_render else None
+    )
+    await instance.auto_render_reply(event)
+    if enable_auto_render:
+        instance.renderer.render.assert_awaited_once_with(TABLE)
+        assert isinstance(event.result.chain[0], Image)
+    else:
+        instance.renderer.render.assert_not_awaited()
+        assert event.result.chain[0].text == TABLE
+    event.send.assert_not_awaited()
+
+    instance.renderer.render.reset_mock()
+    tool_event = make_event()
+    receipt = json.loads(await instance.render_markdown_image(tool_event, TABLE))
+    assert receipt["ok"] is enable_tool
+    assert tool_event.get_extra("markdown_render_tool_sent", False) is enable_tool
+    if enable_tool:
+        instance.renderer.render.assert_awaited_once_with(TABLE)
+        tool_event.send.assert_awaited_once()
+    else:
+        instance.renderer.render.assert_not_awaited()
+        tool_event.send.assert_not_awaited()
+
+
+@pytest.mark.parametrize("reply", [TABLE, "# 补充说明\n\n" + TABLE])
+async def test_successful_tool_skips_auto_only_for_its_own_event(plugin, reply):
+    plugin.enable_tool = True
+    event = make_event([Plain(reply)])
+    original_chain = event.result.chain
+    event.result.use_t2i_ = True
+    receipt = json.loads(await plugin.render_markdown_image(event, TABLE))
+    assert receipt["ok"]
+    assert event.get_extra("markdown_render_tool_sent") is True
+
+    await plugin.auto_render_reply(event)
+    plugin.renderer.render.assert_awaited_once_with(TABLE)
+    event.send.assert_awaited_once()
+    assert event.result.chain is original_chain
+    assert event.result.chain[0].text == reply
+    assert event.result.use_t2i_ is False
+
+    next_event = make_event()
+    await plugin.auto_render_reply(next_event)
+    assert plugin.renderer.render.await_args_list == [call(TABLE), call(TABLE)]
+    assert isinstance(next_event.result.chain[0], Image)
+    assert next_event.get_extra("markdown_render_tool_sent", False) is False
+    next_event.send.assert_not_awaited()
+
+
+@pytest.mark.parametrize("stage", ["render", "send"])
+async def test_failed_tool_does_not_suppress_auto_render(plugin, stage):
+    plugin.enable_tool = True
+    event = make_event()
+    if stage == "render":
+        plugin.renderer.render.side_effect = RenderError("render failed")
+    else:
+        event.send.side_effect = RuntimeError("send failed")
+    receipt = json.loads(await plugin.render_markdown_image(event, TABLE))
+    assert not receipt["ok"] and receipt["stage"] == stage
+    assert event.get_extra("markdown_render_tool_sent", False) is False
+
+    plugin.renderer.render.side_effect = None
+    await plugin.auto_render_reply(event)
+    assert isinstance(event.result.chain[0], Image)
+    assert plugin.renderer.render.await_count == 2
+    assert event.send.await_count == (1 if stage == "send" else 0)
+
+
+async def test_auto_render_does_not_block_explicit_tool_calls_in_the_same_turn(plugin):
+    plugin.enable_tool = True
+    event = make_event()
+    for markdown in ("# 第一部分", "# 第二部分"):
+        receipt = json.loads(await plugin.render_markdown_image(event, markdown))
+        assert receipt["ok"]
+    await plugin.auto_render_reply(event)
+    assert plugin.renderer.render.await_args_list == [
+        call("# 第一部分"),
+        call("# 第二部分"),
+    ]
+    assert event.send.await_count == 2
+    assert event.result.chain[0].text == TABLE
 
 
 async def test_auto_replaces_text_once_preserving_mention_and_quote(plugin):
@@ -169,18 +266,22 @@ async def test_threshold_is_configurable(plugin):
 @pytest.mark.parametrize(
     "config",
     [
-        {"mode": "both"},
-        {"mode": ""},
-        {"mode": True},
         {"auto_threshold": 0},
         {"auto_threshold": 31},
         {"auto_threshold": True},
         {"auto_threshold": "6"},
     ],
 )
-def test_invalid_mode_or_threshold_fails_fast(config):
-    with pytest.raises(RenderError):
+def test_invalid_threshold_fails_fast(config):
+    with pytest.raises(RenderError, match="auto_threshold"):
         MarkdownImagePlugin(SimpleNamespace(), config)
+
+
+@pytest.mark.parametrize("setting", ["enable_tool", "enable_auto_render"])
+@pytest.mark.parametrize("value", [None, 0, 1, "true", "false", [], {}])
+def test_invalid_feature_flag_fails_fast(setting, value):
+    with pytest.raises(RenderError, match=setting):
+        MarkdownImagePlugin(SimpleNamespace(), {setting: value})
 
 
 async def test_partial_render_preserves_prose_and_multiple_blocks_in_order(plugin):

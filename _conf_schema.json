@@ -1,11 +1,15 @@
 {
-  "mode": {
-    "description": "转图模式",
-    "type": "string",
-    "default": "tool",
-    "options": ["tool", "auto"],
-    "labels": ["模型工具", "自动检测"],
-    "hint": "tool：提供 render_markdown_image，由模型决定调用。auto：完整回复总分达到阈值后，若有可独立转换的表格或多行代码块，且区块外得分低于阈值，只转换这些区块，其余文字保留原文和顺序；否则整篇转图。任一区块失败保留整条原文。自动模式等待完整回复后发送，保存后生效。"
+  "enable_tool": {
+    "description": "启用模型转图工具",
+    "type": "bool",
+    "default": false,
+    "hint": "向模型提供 render_markdown_image，由模型主动调用并发送图片。与自动渲染独立，可同时开启或关闭；共用图片样式与渲染资源。"
+  },
+  "enable_auto_render": {
+    "description": "启用自动渲染",
+    "type": "bool",
+    "default": true,
+    "hint": "完整回复总分达到阈值后，若有可独立转换的表格或多行代码块，且区块外得分低于阈值，只转换这些区块，其余文字保留原文和顺序；否则整篇转图。任一区块失败保留整条原文。开启后等待完整回复再发送，保存后生效。与模型工具同时开启时，工具成功发送图片后，本轮后续文字不再自动转图，下一轮恢复检测。"
   },
   "auto_threshold": {
     "description": "自动转图阈值",

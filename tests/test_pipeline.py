@@ -18,6 +18,7 @@ from astrbot_plugin_markdown_render.renderer import RenderError
 
 
 @pytest.mark.parametrize("render_fails", [False, True])
+@pytest.mark.parametrize("tool_sent", [False, True])
 @pytest.mark.parametrize(
     ("before", "block", "after"),
     [
@@ -35,7 +36,7 @@ from astrbot_plugin_markdown_render.renderer import RenderError
     ids=["table", "code-with-separators"],
 )
 async def test_real_pipeline_sends_image_or_original_text_once(
-    render_fails, before, block, after, monkeypatch
+    render_fails, tool_sent, before, block, after, monkeypatch
 ):
     config = deepcopy(DEFAULT_CONFIG)
     config["t2i"] = True
@@ -48,7 +49,9 @@ async def test_real_pipeline_sends_image_or_original_text_once(
     config["provider_tts_settings"]["enable"] = False
     context = SimpleNamespace(get_using_tts_provider_async=AsyncMock(return_value=None))
     pipeline = PipelineContext(config, SimpleNamespace(context=context), "test")
-    plugin = MarkdownImagePlugin(context, {"mode": "auto"})
+    plugin = MarkdownImagePlugin(
+        context, {"enable_tool": True, "enable_auto_render": True}
+    )
     plugin.renderer.render = AsyncMock(
         return_value=b"image bytes",
         side_effect=RenderError("browser unavailable") if render_fails else None,
@@ -78,6 +81,7 @@ async def test_real_pipeline_sends_image_or_original_text_once(
         "测试请求", message, PlatformMetadata("webchat", "Test", "test"), "session-1"
     )
     event.send = AsyncMock()
+    event.set_extra("markdown_render_tool_sent", tool_sent)
     markdown = before + block + after
     event.set_result(
         MessageEventResult(
@@ -94,9 +98,12 @@ async def test_real_pipeline_sends_image_or_original_text_once(
     await responder.process(event)
     event.send.assert_awaited_once()
     online_render.assert_not_awaited()
-    plugin.renderer.render.assert_awaited_once_with(block)
+    if tool_sent:
+        plugin.renderer.render.assert_not_awaited()
+    else:
+        plugin.renderer.render.assert_awaited_once_with(block)
     delivered = event.send.call_args.args[0].chain
-    if render_fails:
+    if render_fails or tool_sent:
         assert len(delivered) == 1
         assert isinstance(delivered[0], Plain)
         assert delivered[0].text == markdown

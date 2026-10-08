@@ -1,4 +1,4 @@
-"""Render Markdown through a model tool or automatic reply detection."""
+"""Render Markdown through independently enabled tools and reply detection."""
 
 from __future__ import annotations
 
@@ -52,9 +52,12 @@ class MarkdownImagePlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
         settings = dict(config)
-        self.mode = settings.pop("mode", "tool")
-        if self.mode not in ("tool", "auto"):
-            raise RenderError("mode 必须是 tool（模型工具）或 auto（自动检测）。")
+        self.enable_tool = settings.pop("enable_tool", False)
+        self.enable_auto_render = settings.pop("enable_auto_render", True)
+        if type(self.enable_tool) is not bool:
+            raise RenderError("enable_tool 必须是布尔值（true 或 false）。")
+        if type(self.enable_auto_render) is not bool:
+            raise RenderError("enable_auto_render 必须是布尔值（true 或 false）。")
         self.auto_threshold = settings.pop("auto_threshold", 6)
         if type(self.auto_threshold) is not int or not 1 <= self.auto_threshold <= 30:
             raise RenderError("auto_threshold 必须是 1～30 的整数。")
@@ -78,9 +81,9 @@ class MarkdownImagePlugin(Star):
         return service
 
     async def initialize(self) -> None:
-        """Initialize renderer state and register the selected mode's tool."""
+        """Initialize the shared renderer and register the tool when enabled."""
         await self.renderer.initialize()
-        if self.mode == "tool":
+        if self.enable_tool:
             self.context.add_llm_tools(MarkdownImageTool(self.render_markdown_image))
 
     @filter.event_message_type(filter.EventMessageType.ALL, priority=100)
@@ -90,7 +93,7 @@ class MarkdownImagePlugin(Star):
         Args:
             event: Incoming event before AstrBot chooses its streaming mode.
         """
-        if self.mode == "auto":
+        if self.enable_auto_render:
             event.set_extra("enable_streaming", False)
 
     @filter.on_decorating_result()
@@ -100,13 +103,15 @@ class MarkdownImagePlugin(Star):
         Args:
             event: Event containing the complete reply about to be sent.
         """
-        if self.mode != "auto":
+        if not self.enable_auto_render:
             return
         result = event.get_result()
         if result is None or not result.is_llm_result() or not result.chain:
             return
         # Auto mode owns this reply's image decision, including text on failure.
         result.use_t2i_ = False
+        if event.get_extra("markdown_render_tool_sent", False):
+            return
         if not all(isinstance(part, Plain | At | Reply) for part in result.chain):
             return
         positions = [
@@ -168,12 +173,12 @@ class MarkdownImagePlugin(Star):
         Returns:
             A JSON delivery receipt or actionable failure description.
         """
-        if self.mode != "tool":
+        if not self.enable_tool:
             return json.dumps(
                 {
                     "ok": False,
-                    "stage": "mode",
-                    "error": "当前为自动检测模式，未启用模型转图工具。",
+                    "stage": "disabled",
+                    "error": "模型转图工具未启用，请开启 enable_tool。",
                 },
                 ensure_ascii=False,
             )
@@ -209,6 +214,7 @@ class MarkdownImagePlugin(Star):
                 },
                 ensure_ascii=False,
             )
+        event.set_extra("markdown_render_tool_sent", True)
         return json.dumps(
             {
                 "ok": True,

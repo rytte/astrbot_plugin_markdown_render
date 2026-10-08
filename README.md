@@ -1,6 +1,6 @@
 # MarkDown 渲染
 
-AstrBot 插件，提供**模型工具**和**自动检测**两种转图模式。将 Markdown 在本机转换为 HTML，再使用 Chromium 或 Edge 截图并发送到当前会话。正文不发送到在线渲染服务。
+AstrBot 插件，提供可独立开启的**模型工具**和**自动渲染**。将 Markdown 在本机转换为 HTML，再使用 Chromium 或 Edge 截图并发送到当前会话。正文不发送到在线渲染服务。
 
 [查看实际渲染示例](./demo.png)
 
@@ -15,24 +15,9 @@ AstrBot 插件，提供**模型工具**和**自动检测**两种转图模式。�
 
 要求 AstrBot **>=4.27,<5**、Python 3.12+，以及支持图片消息的平台适配器。已针对本地 AstrBot 4.27.4 验证接口。
 
-1. 将完整插件目录放入 `AstrBot/data/plugins/astrbot_plugin_markdown_render/`，或在 AstrBot 管理面板上传插件 ZIP。
-2. 安装本插件依赖，并安装、启用 `astrbot_plugin_browser` 浏览器服务插件。由浏览器服务统一安装 Playwright 和 Chromium：
+## 模型工具（默认关闭）
 
-   ```bash
-   python -m pip install -r data/plugins/astrbot_plugin_markdown_render/requirements.txt
-   python -m pip install -r data/plugins/astrbot_plugin_browser/requirements.txt
-   python -m playwright install chromium
-   ```
-
-   也可以在 `astrbot_plugin_browser` 配置中指定本机已有的 Chromium 或 Edge 可执行文件路径。
-
-   Linux 若缺少浏览器系统依赖，改用 `python -m playwright install --with-deps chromium`（安装系统依赖可能需要管理员权限）。中文字体建议安装 `fonts-noto-cjk`。Docker 部署必须在运行 AstrBot 的容器环境里安装浏览器、系统依赖和字体。
-
-3. 在 AstrBot 插件管理页加载插件并选择模式。默认 `tool` 模式需要在当前配置/人格的工具选择中启用 `render_markdown_image`，模型需要支持工具调用；`auto` 模式直接检测模型文字回复，不要求模型调用转图工具。
-
-插件通过 `astrbot_plugin_browser` 获取隔离的离线页面会话；浏览器进程由该服务插件统一启动和回收。运行中渲染失败：工具模式返回明确错误；自动模式记录错误并保留原始文字。
-
-## 模式一：模型工具（tool，默认）
+`enable_tool=true` 时提供 `render_markdown_image`，模型需要支持工具调用，并在当前配置/人格的工具选择中启用该工具。
 
 对机器人说：“把以下内容整理成 Markdown，再用图片发给我。”
 
@@ -50,11 +35,11 @@ AstrBot 插件，提供**模型工具**和**自动检测**两种转图模式。�
 
 > 用户要求图片回复，或希望以图片展示表格、步骤、代码时，调用 render_markdown_image，传入完整 Markdown 正文，不要把全文包在代码围栏里。工具成功后图片已发送，不要再次输出全文。收到内容过长错误时，按章节分段调用。
 
-工具模式不自动转换模型的普通文字回复。插件不修改人格提示词。
+模型工具本身不自动转换模型的普通文字回复，自动渲染由独立开关控制。插件不修改人格提示词。
 
-## 模式二：自动检测（auto）
+## 自动渲染（默认开启）
 
-在插件配置中将 `mode` 设为 `auto` 并保存。此模式不注册 `render_markdown_image`，而是在 AstrBot 发送完整模型文字回复前检测 Markdown 结构：
+`enable_auto_render` 默认开启，可在插件配置中独立调整并保存。它在 AstrBot 发送完整模型文字回复前检测 Markdown 结构，不要求模型调用工具。此开关不影响 `render_markdown_image` 的注册：
 
 1. 整条回复的总分低于 `auto_threshold`（默认 6）：保留文字。
 2. 总分达到阈值：若有可独立转换的表格、至少两行非空内容的代码块，再单独计算这些区块之外的 Markdown 得分。区块外得分低于同一阈值时，只转换目标区块，其余文字按原文保留；区块外得分也达到阈值时，才整篇转图。没有可独立转换的区块时，按总分整篇转图。交给 AstrBot 按原顺序统一发送。
@@ -73,6 +58,14 @@ AstrBot 插件，提供**模型工具**和**自动检测**两种转图模式。�
 自动模式在标准 AstrBot 聊天链路中等待完整回复后发送，会关闭本轮事件的流式输出，不改动全局设置。它只处理标为 LLM_RESULT 的完整文字回复；用户消息、普通命令结果、工具消息、流式片段和已发送的流式结束通知均不处理。Live Mode 或不遵循 AstrBot 事件流式设置的第三方 Agent Runner 不保证自动转换。
 
 已有图片、语音等混合媒体消息保持原消息链。正文前后的 @ 与引用保留；@ 穿插在文字段之间时不转换，避免改变语义顺序。对于自动模式处理的完整模型回复，会禁用该条消息后续的 AstrBot 内置转图，避免重复转换或失败后转向在线服务。
+
+## 同时使用与防重复
+
+- 两个开关互不依赖：可以只开启模型工具、只开启自动渲染、同时开启，或全部关闭。
+- 同时开启时，工具成功发送图片后，本轮后续文字保留为文字，不再自动转图，也不交给 AstrBot 内置转图；本轮新增的补充说明同样不自动转图。
+- 防重复标记只保存在当前消息事件中，不影响其他会话或下一轮对话。工具渲染失败、发送报错或取消时不会标记为成功。
+- 模型仍可在同一轮主动多次调用工具，按章节分段发送图片；防重复只限制自动渲染，不拦截显式工具调用。
+- 两项功能共用同一个渲染器、图片宽度和字号，以及现有并发、排队和超时限制。
 
 ### Markdown 检测是否可靠
 
@@ -109,10 +102,12 @@ AstrBot 插件，提供**模型工具**和**自动检测**两种转图模式。�
 
 | 配置 | 默认值 | 说明 |
 | --- | --- | --- |
-| `mode` | `tool` | `tool` 提供模型工具；`auto` 自动检测完整模型文字回复。两种模式互斥 |
+| `enable_tool` | `false` | 是否向模型提供 `render_markdown_image`，与自动渲染独立 |
+| `enable_auto_render` | `true` | 是否自动检测完整模型文字回复；工具本轮成功发图后跳过自动转图 |
 | `auto_threshold` | `6` | 整条回复总分达到此阈值才转图；有可独立转换的区块时，区块外得分也达到此阈值才整篇转图，否则局部转图。整数 1～30 |
 | `width` | `900` | 图片宽度，整数，480～1600 像素 |
 | `font_size` | `22` | 正文字号，整数，14～32 像素 |
+
 使用操作系统的中文字体：优先 Noto Sans CJK SC、微软雅黑、苹方。容器中显示方框通常意味着未安装中文字体。
 
 ## 本地预览与测试
@@ -131,6 +126,6 @@ ruff check astrbot_plugin_markdown_render
 ruff format --check astrbot_plugin_markdown_render
 ```
 
-测试依赖 `pytest`、`pytest-asyncio`、Pillow 及已安装的 Chromium；框架集成测试需要可导入 AstrBot。测试使用临时 `ASTRBOT_ROOT`，不修改实际机器人数据。覆盖浏览器渲染与资源释放、工具 schema、模式隔离、检测误触发样例、阈值、局部转图的源码边界和图文顺序、区块失败保留整条原文，以及 AstrBot 实际发送管道中的单次发送与禁止在线转图。
+测试依赖 `pytest`、`pytest-asyncio`、Pillow 及已安装的 Chromium；框架集成测试需要可导入 AstrBot。测试使用临时 `ASTRBOT_ROOT`，不修改实际机器人数据。覆盖浏览器渲染与资源释放、工具 schema、独立开关与本轮防重复、检测误触发样例、阈值、局部转图的源码边界和图文顺序、区块失败保留整条原文，以及 AstrBot 实际发送管道中的单次发送与禁止在线转图。
 
 接口参考：[AstrBot 插件开发文档](https://docs.astrbot.app/dev/star/plugin-new.html)及当前工作区 AstrBot 源码。

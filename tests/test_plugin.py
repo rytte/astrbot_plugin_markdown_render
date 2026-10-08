@@ -3,7 +3,7 @@ import io
 import json
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 from astrbot.api.message_components import Image
@@ -19,7 +19,9 @@ from astrbot_plugin_markdown_render.renderer import RenderError
 def plugin():
     context = object.__new__(Context)
     context.provider_manager = SimpleNamespace(llm_tools=FunctionToolManager())
-    instance = MarkdownImagePlugin(context, {})
+    instance = MarkdownImagePlugin(
+        context, {"enable_tool": True, "enable_auto_render": False}
+    )
     instance.renderer = SimpleNamespace(
         render=AsyncMock(return_value=b"image bytes"),
         initialize=AsyncMock(),
@@ -40,12 +42,12 @@ async def test_real_astrbot_metadata_and_tool_schema(plugin):
     assert tool.handler_module_path == MarkdownImagePlugin.__module__
     schema = ToolSet([tool]).openai_schema()[0]["function"]
     assert schema["parameters"]["required"] == ["markdown"]
-    event = SimpleNamespace(send=AsyncMock())
+    event = SimpleNamespace(send=AsyncMock(), set_extra=Mock())
     assert json.loads(await tool.handler(event, markdown="# 正文"))["ok"]
 
 
 async def test_sends_image_to_current_event_once(plugin):
-    event = SimpleNamespace(send=AsyncMock())
+    event = SimpleNamespace(send=AsyncMock(), set_extra=Mock())
     result = json.loads(await plugin.render_markdown_image(event, "# 标题"))
     assert result["ok"] and result["sent_images"] == 1
     plugin.renderer.render.assert_awaited_once_with("# 标题")
@@ -55,31 +57,46 @@ async def test_sends_image_to_current_event_once(plugin):
     assert len(message.chain) == 1
     assert isinstance(message.chain[0], Image)
     assert message.chain[0].file == "base64://aW1hZ2UgYnl0ZXM="
+    event.set_extra.assert_called_once_with("markdown_render_tool_sent", True)
 
 
 @pytest.mark.parametrize("error", [RenderError("内容过长"), RuntimeError("details")])
 async def test_render_failure_sends_nothing(plugin, error):
     plugin.renderer.render.side_effect = error
-    event = SimpleNamespace(send=AsyncMock())
+    event = SimpleNamespace(send=AsyncMock(), set_extra=Mock())
     result = json.loads(await plugin.render_markdown_image(event, "正文"))
     assert not result["ok"] and result["stage"] == "render"
     event.send.assert_not_awaited()
+    event.set_extra.assert_not_called()
 
 
 async def test_send_failure_is_not_reported_as_success_or_retried(plugin):
-    event = SimpleNamespace(send=AsyncMock(side_effect=RuntimeError("failed")))
+    event = SimpleNamespace(
+        send=AsyncMock(side_effect=RuntimeError("failed")), set_extra=Mock()
+    )
     result = json.loads(await plugin.render_markdown_image(event, "正文"))
     assert not result["ok"] and result["stage"] == "send"
     assert "勿自动重试" in result["error"]
     event.send.assert_awaited_once()
+    event.set_extra.assert_not_called()
 
 
 async def test_cancellation_propagates_without_sending(plugin):
     plugin.renderer.render.side_effect = asyncio.CancelledError
-    event = SimpleNamespace(send=AsyncMock())
+    event = SimpleNamespace(send=AsyncMock(), set_extra=Mock())
     with pytest.raises(asyncio.CancelledError):
         await plugin.render_markdown_image(event, "正文")
     event.send.assert_not_awaited()
+    event.set_extra.assert_not_called()
+
+
+async def test_feature_defaults(plugin):
+    instance = MarkdownImagePlugin(plugin.context, {})
+    assert instance.enable_tool is False
+    assert instance.enable_auto_render is True
+    instance.renderer = plugin.renderer
+    await instance.initialize()
+    assert not instance.context.get_llm_tool_manager().func_list
 
 
 async def test_plugin_lifecycle(plugin):
@@ -124,8 +141,10 @@ def test_unknown_plugin_config_fails_with_clear_error():
 
 
 async def test_real_render_to_astrbot_image():
-    instance = MarkdownImagePlugin(SimpleNamespace(add_llm_tools=lambda tool: None), {})
-    event = SimpleNamespace(send=AsyncMock())
+    instance = MarkdownImagePlugin(
+        SimpleNamespace(add_llm_tools=lambda tool: None), {"enable_tool": True}
+    )
+    event = SimpleNamespace(send=AsyncMock(), set_extra=Mock())
     try:
         await instance.initialize()
         from PIL import Image as PILImage
@@ -152,6 +171,8 @@ async def test_dashboard_save_reloads_markdown_config(plugin, tmp_path, monkeypa
     )
     config_path = str(tmp_path / "config.json")
     config = AstrBotConfig(config_path, schema=schema)
+    assert config["enable_tool"] is False
+    assert config["enable_auto_render"] is True
     metadata = SimpleNamespace(config=config)
     current = MarkdownImagePlugin(plugin.context, config)
     previous = current
@@ -173,19 +194,24 @@ async def test_dashboard_save_reloads_markdown_config(plugin, tmp_path, monkeypa
         patch.object(MarkdownRenderer, "close", new_callable=AsyncMock) as close,
     ):
         await current.initialize()
+        assert not plugin.context.get_llm_tool_manager().func_list
         await service.save_plugin_configs(
-            dict(config, width=1000),
+            dict(config, width=1000, enable_tool=True, enable_auto_render=False),
             "astrbot_plugin_markdown_render",
         )
         manager.reload.assert_awaited_once_with("astrbot_plugin_markdown_render")
         close.assert_awaited_once()
         assert current is not previous
         assert current.renderer.width == 1000
+        assert current.enable_tool is True
+        assert current.enable_auto_render is False
+        assert previous.enable_tool is False
+        assert previous.enable_auto_render is True
         tool = plugin.context.get_llm_tool_manager().get_func("render_markdown_image")
         assert tool.handler.__self__ is current
         current.renderer.render = AsyncMock(return_value=b"image bytes")
         for _ in range(2):
-            event = SimpleNamespace(send=AsyncMock())
+            event = SimpleNamespace(send=AsyncMock(), set_extra=Mock())
             result = json.loads(await tool.handler(event, markdown="正文"))
             assert result["ok"]
         assert current.renderer.render.await_count == 2
