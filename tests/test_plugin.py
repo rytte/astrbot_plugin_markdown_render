@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 from astrbot.api.message_components import Image
+from astrbot.api.provider import ProviderRequest
 from astrbot.api.star import Context
 from astrbot.core.agent.tool import ToolSet
 from astrbot.core.provider.func_tool_manager import FunctionToolManager
@@ -172,6 +173,8 @@ async def test_dashboard_save_reloads_markdown_config(plugin, tmp_path, monkeypa
     config_path = str(tmp_path / "config.json")
     config = AstrBotConfig(config_path, schema=schema)
     assert config["enable_tool"] is False
+    assert config["enable_tool_prompt"] is False
+    assert config["tool_prompt"]
     assert config["enable_auto_render"] is True
     metadata = SimpleNamespace(config=config)
     current = MarkdownImagePlugin(plugin.context, config)
@@ -196,7 +199,14 @@ async def test_dashboard_save_reloads_markdown_config(plugin, tmp_path, monkeypa
         await current.initialize()
         assert not plugin.context.get_llm_tool_manager().func_list
         await service.save_plugin_configs(
-            dict(config, width=1000, enable_tool=True, enable_auto_render=False),
+            dict(
+                config,
+                width=1000,
+                enable_tool=True,
+                enable_tool_prompt=True,
+                tool_prompt="自定义工具使用偏好",
+                enable_auto_render=False,
+            ),
             "astrbot_plugin_markdown_render",
         )
         manager.reload.assert_awaited_once_with("astrbot_plugin_markdown_render")
@@ -204,11 +214,19 @@ async def test_dashboard_save_reloads_markdown_config(plugin, tmp_path, monkeypa
         assert current is not previous
         assert current.renderer.width == 1000
         assert current.enable_tool is True
+        assert current.enable_tool_prompt is True
+        assert current.tool_prompt == "自定义工具使用偏好"
         assert current.enable_auto_render is False
         assert previous.enable_tool is False
+        assert previous.enable_tool_prompt is False
         assert previous.enable_auto_render is True
         tool = plugin.context.get_llm_tool_manager().get_func("render_markdown_image")
         assert tool.handler.__self__ is current
+        request = ProviderRequest(
+            system_prompt="原系统提示词", func_tool=ToolSet([tool])
+        )
+        await current.inject_tool_prompt(SimpleNamespace(), request)
+        assert request.system_prompt == "原系统提示词\n\n自定义工具使用偏好"
         current.renderer.render = AsyncMock(return_value=b"image bytes")
         for _ in range(2):
             event = SimpleNamespace(send=AsyncMock(), set_extra=Mock())

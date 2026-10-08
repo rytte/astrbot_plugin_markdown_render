@@ -8,10 +8,17 @@ import json
 from astrbot.api import AstrBotConfig, FunctionTool, logger
 from astrbot.api.event import AstrMessageEvent, MessageChain, filter
 from astrbot.api.message_components import At, Image, Plain, Reply
+from astrbot.api.provider import ProviderRequest
 from astrbot.api.star import Context, Star
 
 from .detector import analyze_markdown
 from .renderer import MAX_CHARACTERS, RENDER_TIMEOUT, MarkdownRenderer, RenderError
+
+DEFAULT_TOOL_PROMPT = (
+    "用户明确要求图片回复，或回答包含复杂表格、多行代码、较多排版结构时，"
+    "优先使用 render_markdown_image。"
+    "简短回答和普通列表直接回复文字；用户明确要求纯文本时不要调用。"
+)
 
 
 class MarkdownImageTool(FunctionTool):
@@ -53,9 +60,16 @@ class MarkdownImagePlugin(Star):
         super().__init__(context)
         settings = dict(config)
         self.enable_tool = settings.pop("enable_tool", False)
+        self.enable_tool_prompt = settings.pop("enable_tool_prompt", False)
+        self.tool_prompt = settings.pop("tool_prompt", DEFAULT_TOOL_PROMPT)
         self.enable_auto_render = settings.pop("enable_auto_render", True)
         if type(self.enable_tool) is not bool:
             raise RenderError("enable_tool 必须是布尔值（true 或 false）。")
+        if type(self.enable_tool_prompt) is not bool:
+            raise RenderError("enable_tool_prompt 必须是布尔值（true 或 false）。")
+        if not isinstance(self.tool_prompt, str):
+            raise RenderError("tool_prompt 必须是字符串。")
+        self.tool_prompt = self.tool_prompt.strip()
         if type(self.enable_auto_render) is not bool:
             raise RenderError("enable_auto_render 必须是布尔值（true 或 false）。")
         self.auto_threshold = settings.pop("auto_threshold", 6)
@@ -85,6 +99,20 @@ class MarkdownImagePlugin(Star):
         await self.renderer.initialize()
         if self.enable_tool:
             self.context.add_llm_tools(MarkdownImageTool(self.render_markdown_image))
+
+    @filter.on_llm_request()
+    async def inject_tool_prompt(
+        self, event: AstrMessageEvent, req: ProviderRequest
+    ) -> None:
+        """Append the configured prompt independently of rendering features.
+
+        Args:
+            event: Event associated with the model request.
+            req: Model request whose existing system prompt must be preserved.
+        """
+        if not self.enable_tool_prompt or not self.tool_prompt:
+            return
+        req.system_prompt += ("\n\n" if req.system_prompt else "") + self.tool_prompt
 
     @filter.event_message_type(filter.EventMessageType.ALL, priority=100)
     async def prepare_auto_reply(self, event: AstrMessageEvent) -> None:
