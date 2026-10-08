@@ -3,23 +3,50 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import math
+import re
+import secrets
 from collections.abc import Callable
+from functools import lru_cache
 from html import escape
 from pathlib import Path
 from typing import Any
 
-from markdown_it import MarkdownIt
 from pygments import highlight
 from pygments.formatters import HtmlFormatter
 from pygments.lexers import get_lexer_by_name
 from pygments.util import ClassNotFound
+
+from .markdown_parser import create_parser, is_mermaid
 
 MAX_CHARACTERS = 20_000
 MAX_HEIGHT = 12_000
 MAX_PIXELS = 12_000_000
 MAX_PENDING = 4
 RENDER_TIMEOUT = 45
+ROOT = Path(__file__).parent
+
+
+@lru_cache(maxsize=1)
+def math_styles() -> str:
+    """Embed the bundled WOFF2 fonts without network or local file requests."""
+    directory = ROOT / "assets" / "katex"
+    styles = (directory / "katex.min.css").read_text(encoding="utf-8")
+
+    def embed_font(match: re.Match) -> str:
+        data = base64.b64encode((directory / "fonts" / match[1]).read_bytes()).decode()
+        return f'src:url("data:font/woff2;base64,{data}") format("woff2")'
+
+    return re.sub(r"src:url\(fonts/([\w-]+\.woff2)\)[^;}]*", embed_font, styles)
+
+
+@lru_cache(maxsize=2)
+def extension_library(name: str) -> str:
+    """Read a pinned library distributed with the plugin."""
+    if name not in {"katex", "mermaid"}:
+        raise RenderError("未知的渲染扩展。")
+    return (ROOT / "assets" / name / f"{name}.min.js").read_text(encoding="utf-8")
 
 
 class RenderError(ValueError):
@@ -65,6 +92,32 @@ def render_image_label(renderer, tokens, idx, options, env) -> str:
     )
 
 
+def render_math(renderer, tokens, idx, options, env) -> str:
+    """Keep formula text escaped until the trusted KaTeX renderer consumes it."""
+    if not tokens[idx].content.strip():
+        raise RenderError("LaTeX 公式内容不能为空。")
+    block = tokens[idx].type != "math_inline"
+    tag = "div" if tokens[idx].block else "span"
+    kind = "block" if block else "inline"
+    return f'<{tag} class="math-{kind}">{escape(tokens[idx].content)}</{tag}>'
+
+
+def render_fence(renderer, tokens, idx, options, env) -> str:
+    """Preserve ordinary code fences and isolate escaped Mermaid source."""
+    token = tokens[idx]
+    if not is_mermaid(token):
+        return renderer.fence(tokens, idx, options, env)
+    if not token.content.strip():
+        raise RenderError("Mermaid 图表内容不能为空。")
+    if token.content.lstrip().startswith("---") or re.search(r"%%\s*\{", token.content):
+        raise RenderError("Mermaid 不支持 YAML 配置头或 %%{...}%% 配置指令。")
+    return (
+        '<div class="mermaid-diagram"><pre class="mermaid-source">'
+        + escape(token.content)
+        + "</pre></div>\n"
+    )
+
+
 class MarkdownRenderer:
     """Prepare Markdown and use the shared browser service for screenshots."""
 
@@ -85,12 +138,14 @@ class MarkdownRenderer:
         self.tasks: set[asyncio.Task] = set()
         self.closed = False
         self.initialized = False
-        self.styles = (Path(__file__).parent / "style.css").read_text(encoding="utf-8")
+        self.styles = (ROOT / "style.css").read_text(encoding="utf-8")
         self.styles += HtmlFormatter(style="friendly").get_style_defs("pre code")
-        self.parser = MarkdownIt(
-            "commonmark", {"html": False, "highlight": highlight_code}
-        ).enable(["table", "strikethrough"])
+        self.extensions = (ROOT / "extensions.js").read_text(encoding="utf-8")
+        self.parser = create_parser(highlight_code)
         self.parser.add_render_rule("image", render_image_label)
+        self.parser.add_render_rule("fence", render_fence)
+        for kind in ("math_inline", "math_inline_double", "math_block"):
+            self.parser.add_render_rule(kind, render_math)
 
     async def initialize(self) -> None:
         """Mark the renderer available without owning the shared browser.
@@ -103,7 +158,7 @@ class MarkdownRenderer:
         self.initialized = True
 
     def html(self, markdown: str) -> str:
-        """Convert bounded Markdown into a self-contained, script-free page.
+        """Convert bounded Markdown into an escaped page with local font data.
 
         Args:
             markdown: The original model-written Markdown body.
@@ -119,14 +174,20 @@ class MarkdownRenderer:
         if len(markdown) > MAX_CHARACTERS:
             raise RenderError("Markdown 超过 20000 个字符，请按章节分段调用。")
         body = self.parser.render(markdown)
+        nonce = secrets.token_urlsafe(24)
+        styles = self.styles
+        if 'class="math-' in body:
+            styles = math_styles() + styles
         return (
             '<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">'
             '<meta http-equiv="Content-Security-Policy" '
-            "content=\"default-src 'none'; style-src 'unsafe-inline'; "
+            f"content=\"default-src 'none'; script-src 'nonce-{nonce}'; "
+            "style-src 'unsafe-inline'; font-src data:; "
             "base-uri 'none'; form-action 'none'\">"
+            f'<meta name="render-nonce" content="{nonce}">'
             '<meta name="viewport" content="width=device-width, initial-scale=1">'
             "<style>"
-            + self.styles
+            + styles
             + f":root{{--body-size:{self.font_size}px;}}"
             + '</style></head><body><article class="markdown-body">'
             + body
@@ -166,12 +227,43 @@ class MarkdownRenderer:
             async with asyncio.timeout(RENDER_TIMEOUT):
                 async with self.lock:
                     document = await asyncio.to_thread(self.html, markdown)
+                    math_enabled = 'class="math-' in document
+                    diagrams_enabled = 'class="mermaid-diagram"' in document
                     async with service.session(
                         viewport={"width": self.width, "height": 720},
-                        javascript_enabled=False,
+                        javascript_enabled=math_enabled or diagrams_enabled,
                         timeout=RENDER_TIMEOUT,
                     ) as page:
                         await page.set_content(document, wait_until="load")
+                        for name, enabled in (
+                            ("katex", math_enabled),
+                            ("mermaid", diagrams_enabled),
+                        ):
+                            if enabled:
+                                library = await asyncio.to_thread(
+                                    extension_library, name
+                                )
+                                await page.evaluate(
+                                    """source => {
+                                        const script = document.createElement('script');
+                                        script.nonce = document.querySelector('meta[name="render-nonce"]').content;
+                                        script.textContent = source;
+                                        document.head.appendChild(script);
+                                        script.remove();
+                                    }""",
+                                    library,
+                                )
+                        if math_enabled or diagrams_enabled:
+                            result = await page.evaluate(
+                                self.extensions,
+                                {
+                                    "math": math_enabled,
+                                    "diagrams": diagrams_enabled,
+                                    "fontSize": self.font_size,
+                                },
+                            )
+                            if result["error"]:
+                                raise RenderError(result["error"])
                         await page.evaluate("document.fonts.ready")
                         article = page.locator(".markdown-body")
                         box = await article.bounding_box()

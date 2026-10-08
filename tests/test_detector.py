@@ -181,3 +181,83 @@ def test_nested_code_in_a_quote_keeps_its_surrounding_structure():
     analysis = analyze_markdown("> 说明\n>\n> ```python\n> x = 1\n> print(x)\n> ```")
     assert analysis.score >= 6
     assert analysis.block_spans == ()
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "$x^2$",
+        r"\(x^2\)",
+        "$$x^2$$",
+        "$$\nx^2\n$$",
+        r"\[x^2\]",
+        "\\[\nx^2\n\\]",
+        "公式 $$x^2$$。",
+        "```mermaid\nflowchart LR; A-->B\n```",
+        "```mermaid\nflowchart LR\nA-->B\n```",
+    ],
+)
+def test_math_and_mermaid_each_score_six_points(text):
+    assert analyze_markdown(text).score == 6
+
+
+def test_math_mermaid_and_code_have_independent_six_point_caps():
+    formula = "$x$\n\n$$x^2$$\n\n"
+    diagram = "```mermaid\nflowchart LR; A-->B\n```\n\n"
+    text = formula * 4 + diagram * 4 + (CODE + "\n") * 4 + TABLE
+    assert analyze_markdown(text).score == 26
+
+
+@pytest.mark.parametrize("newline", ["\n", "\r\n", "\r"])
+@pytest.mark.parametrize("formula", ["$$\nx^2\n$$\n", "\\[\nx^2\n\\]\n"])
+def test_new_partial_blocks_preserve_source_ranges_and_order(newline, formula):
+    diagram = "```mermaid\nflowchart LR; A-->B\n```\n"
+    blocks = [formula, diagram, TABLE, CODE]
+    text = ("介绍\n\n" + "\n说明\n\n".join(blocks) + "\n结尾").replace("\n", newline)
+    analysis = analyze_markdown(text)
+    assert analysis.score == 26
+    assert analysis.outside_score == 0
+    assert [text[start:end] for start, end in analysis.block_spans] == [
+        block.replace("\n", newline) for block in blocks
+    ]
+
+
+def test_inline_math_counts_outside_without_splitting_the_sentence():
+    text = "正文里的 $x^2$ 不单独拆开。\n\n" + TABLE
+    analysis = analyze_markdown(text)
+    assert analysis.score == 14
+    assert analysis.outside_score == 6
+    assert [text[start:end] for start, end in analysis.block_spans] == [TABLE]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "价格 $5 和 $10。",
+        r"\$x\$",
+        "`$x$`",
+        "```text\n$x$\n```",
+        "$$\n$$",
+        "```mermaid\n```",
+    ],
+)
+def test_currency_escapes_code_and_empty_blocks_are_not_six_point_math(text):
+    assert analyze_markdown(text).score < 6
+
+
+@pytest.mark.parametrize("markup", ["$$", r"\["])
+def test_nested_math_keeps_quote_and_list_structure(markup):
+    closing = "$$" if markup == "$$" else r"\]"
+    quote = f"> {markup}\n> x^2\n> {closing}"
+    analysis = analyze_markdown(quote)
+    assert analysis.score == 8
+    assert analysis.block_spans == ()
+
+
+@pytest.mark.parametrize("formula", ["$$\nx^2\n$$", "\\[\nx^2\n\\]"])
+def test_block_math_interrupts_a_paragraph_without_requiring_blank_lines(formula):
+    text = "公式说明：\n" + formula + "\n结束说明。"
+    analysis = analyze_markdown(text)
+    assert analysis.score == 6
+    assert analysis.outside_score == 0
+    assert [text[start:end] for start, end in analysis.block_spans] == [formula + "\n"]

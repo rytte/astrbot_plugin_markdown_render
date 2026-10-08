@@ -4,8 +4,9 @@ import re
 from collections import Counter
 from dataclasses import dataclass
 
-from markdown_it import MarkdownIt
 from markdown_it.token import Token
+
+from .markdown_parser import create_parser, is_mermaid
 
 
 @dataclass(frozen=True)
@@ -26,18 +27,31 @@ def _score_tokens(tokens: list[Token]) -> int:
     blocks = Counter()
     inline = Counter()
     code_score = 0
+    diagram_score = 0
+    math_score = 0
     for token in tokens:
         blocks[token.type] += 1
-        if token.type in {"fence", "code_block"}:
+        if is_mermaid(token):
+            diagram_score += 6 if token.content.strip() else 0
+        elif token.type == "math_block":
+            math_score += 6 if token.content.strip() else 0
+        elif token.type in {"fence", "code_block"}:
             lines = _nonempty_code_lines(token)
             code_score += 6 if lines >= 2 else 2 if lines else 0
         elif token.type == "inline":
             inline.update(child.type for child in token.children or [])
+            math_score += 6 * sum(
+                child.type in {"math_inline", "math_inline_double"}
+                and bool(child.content.strip())
+                for child in token.children or []
+            )
 
     # Per-category caps keep repeated inline markup from dominating the decision.
     return (
         min(blocks["table_open"] * 6, 6)
         + min(code_score, 6)
+        + min(diagram_score, 6)
+        + min(math_score, 6)
         + min(blocks["heading_open"] * 2, 6)
         + min(blocks["list_item_open"], 6)
         + min(blocks["blockquote_open"] * 2, 4)
@@ -58,9 +72,7 @@ def analyze_markdown(text: str) -> MarkdownAnalysis:
         compares both scores with its threshold. Empty ranges mean the reply cannot
         be rendered in independent blocks.
     """
-    parser = MarkdownIt("commonmark", {"html": False}).enable(
-        ["table", "strikethrough"]
-    )
+    parser = create_parser()
     environment = {}
     tokens = parser.parse(text, environment)
     score = _score_tokens(tokens)
@@ -79,10 +91,14 @@ def analyze_markdown(text: str) -> MarkdownAnalysis:
             if token.type == "table_close":
                 in_table = False
         elif (
-            token.type in {"fence", "code_block"}
-            and token.level == 0
+            token.type == "math_block"
+            and bool(token.content.strip())
+            or is_mermaid(token)
+            and bool(token.content.strip())
+            or token.type in {"fence", "code_block"}
+            and not is_mermaid(token)
             and _nonempty_code_lines(token) >= 2
-        ):
+        ) and token.level == 0:
             line_spans.append(token.map)
         else:
             outside_tokens.append(token)

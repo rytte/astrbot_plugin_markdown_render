@@ -409,3 +409,39 @@ async def test_partial_render_has_one_total_timeout(plugin, monkeypatch):
     assert event.result.chain is original
     assert event.result.chain[0].text == markdown
     event.send.assert_not_awaited()
+
+
+@pytest.mark.parametrize("formula", ["$$\nx^2\n$$", "\\[\nx^2\n\\]"])
+async def test_formulas_and_mermaid_render_partially_in_original_order(plugin, formula):
+    diagram = "```mermaid\nflowchart LR; A-->B\n```"
+    text = "公式说明。\n\n" + formula + "\n\n图表说明。\n\n" + diagram + "\n\n结束。"
+    event = make_event([Plain(text)])
+    await plugin.auto_render_reply(event)
+    assert plugin.renderer.render.await_args_list == [
+        call(formula + "\n"),
+        call(diagram + "\n"),
+    ]
+    assert [type(part) for part in event.result.chain] == [
+        Plain,
+        Image,
+        Plain,
+        Image,
+        Plain,
+    ]
+    assert event.result.chain[0].text == "公式说明。\n\n"
+    assert event.result.chain[2].text == "\n图表说明。\n\n"
+    assert event.result.chain[4].text == "\n结束。"
+
+
+@pytest.mark.parametrize(
+    "block", ["$$\nx^2\n$$", "```mermaid\nflowchart LR; A-->B\n```"]
+)
+async def test_new_block_failure_preserves_the_entire_original_reply(plugin, block):
+    text = TABLE + "\n\n" + block
+    event = make_event([Plain(text)])
+    original = event.result.chain
+    plugin.renderer.render.side_effect = [b"first image", RenderError("invalid syntax")]
+    await plugin.auto_render_reply(event)
+    assert event.result.chain is original
+    assert event.result.chain[0].text == text
+    event.send.assert_not_awaited()

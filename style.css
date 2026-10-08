@@ -34,3 +34,12 @@ th { background: #eaf0f8; color: #1b3457; font-weight: 600; }
 tr:nth-child(even) td { background: #f7f9fc; }
 hr { border: 0; height: 1px; background: #dce4ee; margin: 1.3em 0; }
 .image-label { color: #64748b; font-style: italic; }
+.task-list-item { list-style: none; }
+.task-list-item-checkbox { appearance: none; display: inline-block; position: relative; width: 1em; height: 1em; margin: 0 .45em 0 -1.4em; border: 2px solid #7890af; border-radius: 3px; vertical-align: -.1em; background: #fff; opacity: 1; }
+.task-list-item-checkbox:checked { background: #376cb2; border-color: #376cb2; }
+.task-list-item-checkbox:checked::after { content: ""; position: absolute; left: 25%; top: 5%; width: 35%; height: 65%; border: solid white; border-width: 0 2px 2px 0; transform: rotate(45deg); }
+.math-block { display: block; margin: .8em 0; overflow-wrap: normal; }
+.math-inline, .katex { overflow-wrap: normal; }
+.katex-display { margin: .8em 0; }
+.mermaid-diagram { margin: 1em 0; }
+.mermaid-diagram svg { display: block; max-width: 100%; height: auto; margin: 0 auto; }

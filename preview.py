@@ -4,6 +4,8 @@ import argparse
 import asyncio
 from pathlib import Path
 
+from astrbot_plugin_browser.service import BrowserService
+
 from .renderer import MarkdownRenderer
 
 
@@ -14,13 +16,16 @@ async def main() -> None:
     parser.add_argument("output", type=Path)
     args = parser.parse_args()
     markdown = await asyncio.to_thread(args.source.read_text, encoding="utf-8")
-    renderer = MarkdownRenderer()
+    service = BrowserService()
+    renderer = MarkdownRenderer(browser_service_resolver=lambda: service)
     try:
+        await service.initialize()
         await renderer.initialize()
         png = await renderer.render(markdown)
         await asyncio.to_thread(args.output.write_bytes, png)
     finally:
         await renderer.close()
+        await service.close()
     print(args.output.resolve())
 
 
