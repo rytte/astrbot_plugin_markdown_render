@@ -161,8 +161,10 @@ class MarkdownImagePlugin(Star):
             return
         try:
             async with asyncio.timeout(RENDER_TIMEOUT):
-                analysis = await asyncio.to_thread(analyze_markdown, markdown)
-                if analysis.score < self.auto_threshold:
+                analysis = await asyncio.to_thread(
+                    analyze_markdown, markdown, self.auto_threshold
+                )
+                if analysis.score < self.auto_threshold and not analysis.has_long_list:
                     return
                 replacement = []
                 cursor = 0

@@ -16,6 +16,7 @@ class MarkdownAnalysis:
     score: int
     outside_score: int
     block_spans: tuple[tuple[int, int], ...]
+    has_long_list: bool
 
 
 def _nonempty_code_lines(token: Token) -> int:
@@ -61,36 +62,57 @@ def _score_tokens(tokens: list[Token]) -> int:
     )
 
 
-def analyze_markdown(text: str) -> MarkdownAnalysis:
-    """Score the reply and separately score formatting outside tables/multiline code.
+def analyze_markdown(text: str, threshold: int) -> MarkdownAnalysis:
+    """Locate independent blocks and score the reply without qualifying lists.
 
     Args:
         text: Complete Markdown reply, bounded by the caller before parsing.
+        threshold: Minimum direct item count for an independent top-level list.
 
     Returns:
-        Whole/outside scores and character ranges for partial rendering. The caller
-        compares both scores with its threshold. Empty ranges mean the reply cannot
-        be rendered in independent blocks.
+        Whole/outside scores, character ranges and a score-independent list trigger.
+        Reference definitions prevent partial rendering to retain link context.
     """
     parser = create_parser()
     environment = {}
     tokens = parser.parse(text, environment)
-    score = _score_tokens(tokens)
-    # Reference definitions outside a block must remain with their consumers.
-    if environment.get("references"):
-        return MarkdownAnalysis(score, score, ())
-
     line_spans = []
+    scoring_tokens = []
     outside_tokens = []
-    in_table = False
-    for token in tokens:
-        if token.type == "table_open" and token.level == 0:
-            line_spans.append(token.map)
-            in_table = True
-        elif in_table:
-            if token.type == "table_close":
-                in_table = False
-        elif (
+    has_long_list = False
+    token_index = 0
+    while token_index < len(tokens):
+        token = tokens[token_index]
+        if token.level == 0 and token.type in {
+            "table_open",
+            "bullet_list_open",
+            "ordered_list_open",
+        }:
+            block_end = token_index + 1
+            while tokens[block_end].level != 0:
+                block_end += 1
+            block_tokens = tokens[token_index : block_end + 1]
+            is_long_list = (
+                token.type != "table_open"
+                and sum(
+                    child.type == "list_item_open" and child.level == 1
+                    for child in block_tokens
+                )
+                >= threshold
+            )
+            if is_long_list:
+                has_long_list = True
+            else:
+                scoring_tokens.extend(block_tokens)
+            if token.type == "table_open" or is_long_list:
+                line_spans.append(token.map)
+            else:
+                outside_tokens.extend(block_tokens)
+            token_index = block_end + 1
+            continue
+
+        scoring_tokens.append(token)
+        if (
             token.type == "math_block"
             and bool(token.content.strip())
             or is_mermaid(token)
@@ -102,10 +124,14 @@ def analyze_markdown(text: str) -> MarkdownAnalysis:
             line_spans.append(token.map)
         else:
             outside_tokens.append(token)
+        token_index += 1
 
+    score = _score_tokens(scoring_tokens)
+    if environment.get("references"):
+        return MarkdownAnalysis(score, score, (), has_long_list)
     outside_score = _score_tokens(outside_tokens)
     if not line_spans:
-        return MarkdownAnalysis(score, outside_score, ())
+        return MarkdownAnalysis(score, outside_score, (), has_long_list)
 
     # Match MarkdownIt's newline normalization while retaining original characters.
     offsets = [0, *(match.end() for match in re.finditer(r"\r\n?|\n", text))]
@@ -115,4 +141,5 @@ def analyze_markdown(text: str) -> MarkdownAnalysis:
         score,
         outside_score,
         tuple((offsets[start], offsets[end]) for start, end in line_spans),
+        has_long_list,
     )

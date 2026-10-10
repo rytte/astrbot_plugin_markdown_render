@@ -445,3 +445,147 @@ async def test_new_block_failure_preserves_the_entire_original_reply(plugin, blo
     assert event.result.chain is original
     assert event.result.chain[0].text == text
     event.send.assert_not_awaited()
+
+
+@pytest.mark.parametrize("marker", ["- ", "3. ", "- [ ] ", "- [x] "])
+@pytest.mark.parametrize("threshold", [1, 6, 8, 30])
+@pytest.mark.parametrize("extra_items", [0, 20])
+async def test_qualifying_lists_render_even_when_their_score_is_zero(
+    plugin, marker, threshold, extra_items
+):
+    plugin.auto_threshold = threshold
+    text = "\n".join(f"{marker}项目{index}" for index in range(threshold + extra_items))
+    event = make_event([Plain(text)])
+    await plugin.auto_render_reply(event)
+    plugin.renderer.render.assert_awaited_once_with(text)
+    assert [type(part) for part in event.result.chain] == [Image]
+    event.send.assert_not_awaited()
+
+
+@pytest.mark.parametrize("marker", ["- ", "3. ", "- [ ] ", "- [x] "])
+@pytest.mark.parametrize("threshold", [6, 8, 30])
+async def test_short_lists_still_require_a_sufficient_formatting_score(
+    plugin, marker, threshold
+):
+    plugin.auto_threshold = threshold
+    text = "\n".join(f"{marker}项目{index}" for index in range(threshold - 1))
+    event = make_event([Plain(text)])
+    original = event.result.chain
+    await plugin.auto_render_reply(event)
+    plugin.renderer.render.assert_not_awaited()
+    assert event.result.chain is original
+
+
+@pytest.mark.parametrize("marker", ["- ", "3. ", "- [ ] ", "- [x] "])
+@pytest.mark.parametrize("newline", ["\n", "\r\n", "\r"])
+async def test_partial_lists_preserve_surrounding_prose_and_original_markers(
+    plugin, marker, newline
+):
+    prefix = "普通说明\n\n".replace("\n", newline)
+    listing = ((marker + "**项目** $x$\n") * 12 + "\n").replace("\n", newline)
+    suffix = "**结尾说明**。"
+    event = make_event([Plain(prefix + listing + suffix)])
+    await plugin.auto_render_reply(event)
+    plugin.renderer.render.assert_awaited_once_with(listing)
+    assert [type(part) for part in event.result.chain] == [Plain, Image, Plain]
+    assert event.result.chain[0].text == prefix
+    assert event.result.chain[2].text == suffix
+
+
+async def test_long_list_uses_the_current_configured_threshold(plugin):
+    text = "- 项目\n" * 7
+    event = make_event([Plain(text)])
+    plugin.auto_threshold = 8
+    await plugin.auto_render_reply(event)
+    plugin.renderer.render.assert_not_awaited()
+    plugin.auto_threshold = 6
+    await plugin.auto_render_reply(event)
+    plugin.renderer.render.assert_awaited_once_with(text)
+
+
+async def test_qualifying_list_still_renders_whole_reply_when_outside_score_reaches_threshold(
+    plugin,
+):
+    prefix = "# 标题一\n\n## 标题二\n\n### 标题三\n\n"
+    text = prefix + "- 项目\n" * 6 + "\n结尾。"
+    event = make_event([Plain(text)])
+    await plugin.auto_render_reply(event)
+    plugin.renderer.render.assert_awaited_once_with(text)
+    assert [type(part) for part in event.result.chain] == [Image]
+
+
+async def test_nested_list_contents_render_together_with_qualifying_parent(plugin):
+    prefix = "说明\n\n"
+    listing = "- 父项一\n" + "  - 子项\n" * 12 + "- 父项\n" * 5 + "\n"
+    suffix = "结尾。"
+    event = make_event([Plain(prefix + listing + suffix)])
+    await plugin.auto_render_reply(event)
+    plugin.renderer.render.assert_awaited_once_with(listing)
+    assert [type(part) for part in event.result.chain] == [Plain, Image, Plain]
+    assert event.result.chain[0].text == prefix
+    assert event.result.chain[2].text == suffix
+
+
+async def test_multiple_lists_and_other_independent_blocks_preserve_render_order(
+    plugin,
+):
+    first_list = "- [ ] 待办\n" * 6 + "\n"
+    table = TABLE + "\n"
+    code = "```python\nfirst = 1\nprint(first)\n```\n"
+    formula = "$$\nx^2\n$$\n"
+    diagram = "```mermaid\nflowchart LR; A-->B\n```\n"
+    second_list = "3. 步骤\n" * 6 + "\n"
+    blocks = [first_list, table, code, formula, diagram, second_list]
+    text = (
+        "介绍\n\n"
+        + first_list
+        + "表格说明\n\n"
+        + table
+        + "\n代码说明\n\n"
+        + code
+        + "\n公式说明\n\n"
+        + formula
+        + "\n图表说明\n\n"
+        + diagram
+        + "\n步骤说明\n\n"
+        + second_list
+        + "结尾。"
+    )
+    event = make_event([Plain(text)])
+    await plugin.auto_render_reply(event)
+    assert plugin.renderer.render.await_args_list == [call(block) for block in blocks]
+    assert [type(part) for part in event.result.chain] == [Plain, Image] * 6 + [Plain]
+    assert [part.text for part in event.result.chain if isinstance(part, Plain)] == [
+        "介绍\n\n",
+        "表格说明\n\n",
+        "\n代码说明\n\n",
+        "\n公式说明\n\n",
+        "\n图表说明\n\n",
+        "\n步骤说明\n\n",
+        "结尾。",
+    ]
+    event.send.assert_not_awaited()
+
+
+async def test_list_partial_failure_retains_original_reply_and_discards_completed_images(
+    plugin,
+):
+    text = "介绍\n\n" + "- 项目\n" * 6 + "\n表格说明\n\n" + TABLE
+    event = make_event([Plain(text)])
+    original = event.result.chain
+    plugin.renderer.render.side_effect = [b"list image", RenderError("table failed")]
+    await plugin.auto_render_reply(event)
+    assert plugin.renderer.render.await_count == 2
+    assert event.result.chain is original
+    assert event.result.chain[0].text == text
+    assert event.result.use_t2i_ is False
+    event.send.assert_not_awaited()
+
+
+async def test_reference_definitions_keep_qualifying_lists_in_the_whole_reply(plugin):
+    plugin.auto_threshold = 8
+    text = "[ref]: https://example.com\n\n" + "- [项目][ref]\n" * 8
+    event = make_event([Plain(text)])
+    await plugin.auto_render_reply(event)
+    plugin.renderer.render.assert_awaited_once_with(text)
+    assert [type(part) for part in event.result.chain] == [Image]
